@@ -12,17 +12,26 @@ import (
 )
 
 const (
-	_bomb   = "☸"
-	_player = "⚘"
-	_dead   = "☠"
-	_wall   = "☲"
+	_bomb    = "☸"
+	_player1 = "⚘"
+	_player2 = "⚗"
+	_dead    = "☠"
+	_wall    = "☲"
 
-	timeout = time.Second * 5
+	timeout    = time.Second * 5
+	_bomb_t    = time.Second * 2
+	_explode_t = time.Second
 )
 
 type bombMsg struct {
 	x int
 	y int
+}
+
+type unfreezeMsg struct {
+	P     *player
+	bombX int
+	bombY int
 }
 
 type exploseMsg struct {
@@ -36,8 +45,9 @@ type board struct {
 }
 
 type player struct {
-	x int
-	y int
+	x          int
+	y          int
+	freezeBomb bool
 }
 
 type bomb struct {
@@ -48,7 +58,8 @@ type bomb struct {
 type explosion [][]int
 
 type game struct {
-	Player player
+	P1     *player
+	P2     *player
 	Board  board
 	Ticks  int
 	Frames int
@@ -104,9 +115,11 @@ func initBoard(mapFile string) board {
 }
 
 func initGame(filePath string) game {
+	board := initBoard(filePath)
 	return game{
-		Player: player{1, 1},
-		Board:  initBoard(filePath),
+		P1:    &player{1, 1, false},
+		P2:    &player{board.Height - 2, board.Width - 2, false},
+		Board: board,
 	}
 }
 
@@ -117,8 +130,10 @@ func (g game) View() string {
 	for i := 0; i < g.Board.Height; i++ {
 		rowBuilder := make([]string, g.Board.Width)
 		for j := 0; j < g.Board.Width; j++ {
-			if i == g.Player.x && j == g.Player.y {
-				rowBuilder[j] = _player
+			if i == g.P1.x && j == g.P1.y {
+				rowBuilder[j] = _player1
+			} else if i == g.P2.x && j == g.P2.y {
+				rowBuilder[j] = _player2
 			} else if g.Board.Arr[i][j] == 1 {
 				rowBuilder[j] = _wall
 			} else if g.Board.Arr[i][j] == 2 {
@@ -135,37 +150,56 @@ func (g game) View() string {
 }
 
 func (g game) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	player := g.P1
 	switch msg.(type) {
 	case tea.KeyMsg:
-		switch msg.(tea.KeyMsg).String() {
+		switch msg := msg.(tea.KeyMsg).String(); msg {
 		case "ctrl+c":
 			return g, tea.Quit
-		case "up":
-			if g.Player.x > 0 && g.Board.Arr[g.Player.x-1][g.Player.y] != 1 {
-				g.Player.x--
+		case "up", "w":
+			if msg == "w" {
+				player = g.P2
 			}
-		case "down":
-			if g.Player.x < g.Board.Height-1 && g.Board.Arr[g.Player.x+1][g.Player.y] != 1 {
-				g.Player.x++
+			if player.x > 0 && g.Board.Arr[player.x-1][player.y] != 1 {
+				player.x--
 			}
-		case "left":
-			if g.Player.y > 0 && g.Board.Arr[g.Player.x][g.Player.y-1] != 1 {
-				g.Player.y--
+		case "down", "s":
+			if msg == "s" {
+				player = g.P2
 			}
-		case "right":
-			if g.Player.y < g.Board.Width-1 && g.Board.Arr[g.Player.x][g.Player.y+1] != 1 {
-				g.Player.y++
+			if player.x < g.Board.Height-1 && g.Board.Arr[player.x+1][player.y] != 1 {
+				player.x++
+			}
+		case "left", "a":
+			if msg == "a" {
+				player = g.P2
+			}
+			if player.y > 0 && g.Board.Arr[player.x][player.y-1] != 1 {
+				player.y--
+			}
+		case "right", "d":
+			if msg == "d" {
+				player = g.P2
+			}
+			if player.y < g.Board.Width-1 && g.Board.Arr[player.x][player.y+1] != 1 {
+				player.y++
 			}
 		case " ":
-			if g.Board.Arr[g.Player.x][g.Player.y] == 0 {
-				g.Board.Arr[g.Player.x][g.Player.y] = 2
-				return g, tickBomb(g.Player.x, g.Player.y)
+			if g.Board.Arr[player.x][player.y] == 0 && !player.freezeBomb {
+				g.Board.Arr[player.x][player.y] = 2
+				player.freezeBomb = true
+				return g, tickUnfreeze(player, player.x, player.y)
 			}
 		}
+	case unfreezeMsg:
+		p := msg.(unfreezeMsg).P
+		x, y := msg.(unfreezeMsg).bombX, msg.(unfreezeMsg).bombY
+		p.freezeBomb = false
+		return g, tickBomb(x, y)
 	case bombMsg:
-		bomb := msg.(bombMsg)
-		g.Board.Arr[bomb.x][bomb.y] = 0
-		explosion := fillExplode(g.Board, bomb.x, bomb.y)
+		x, y := msg.(bombMsg).x, msg.(bombMsg).y
+		g.Board.Arr[x][y] = 0
+		explosion := fillExplode(g.Board, x, y)
 		return g, tickExplode(explosion)
 	case exploseMsg:
 		points := msg.(exploseMsg).e
@@ -181,8 +215,14 @@ func tickBomb(x, y int) tea.Cmd {
 	})
 }
 
-func tickExplode(e explosion) tea.Cmd {
+func tickUnfreeze(p *player, bombX, bombY int) tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return unfreezeMsg{p, bombX, bombY}
+	})
+}
+
+func tickExplode(e explosion) tea.Cmd {
+	return tea.Tick(_explode_t, func(t time.Time) tea.Msg {
 		return exploseMsg{e}
 	})
 }
@@ -206,7 +246,7 @@ func fillExplode(board board, x, y int) explosion {
 		points = append(points, []int{x, right})
 	}
 
-	board.Arr[x][y]--
+	board.Arr[x][y] = -1
 	return append(points, []int{x, y})
 }
 
